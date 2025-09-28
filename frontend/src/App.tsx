@@ -1,10 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import './App.css';
-import { BattleCityGame } from './game/BattleCityGame';
+import { TetrisGame } from './game/TetrisGame';
 
 const App: React.FC = () => {
   const [gameStarted, setGameStarted] = useState<boolean>(false);
-  const gameRef = useRef<BattleCityGame | null>(null);
+  const gameRef = useRef<TetrisGame | null>(null);
   const gameContainerRef = useRef<HTMLDivElement>(null);
 
   const startGame = () => {
@@ -18,7 +18,7 @@ const App: React.FC = () => {
     if (gameStarted && gameContainerRef.current && !gameRef.current) {
       try {
         console.log('Creating BattleCityGame...');
-        gameRef.current = new BattleCityGame(gameContainerRef.current);
+        gameRef.current = new TetrisGame(gameContainerRef.current);
         console.log('Game created successfully');
       } catch (error) {
         console.error('Error creating game:', error);
@@ -48,20 +48,21 @@ const App: React.FC = () => {
     <div className="App">
       <header className="App-header">
         <h1>Superb Game</h1>
-        <p>Battle City - Classic Tank Game</p>
+        <p>Tetris - Classic Puzzle Game</p>
       </header>
 
       <main className="main-content">
         {!gameStarted ? (
           <div className="menu-screen">
             <div className="menu-container">
-              <h2>Battle City</h2>
-              <p>Control your tank and destroy enemy tanks!</p>
+              <h2>Tetris</h2>
+              <p>Arrange falling blocks to clear lines!</p>
               <div className="controls-info">
                 <h3>Controls:</h3>
                 <ul>
-                  <li><strong>Arrow Keys:</strong> Move tank</li>
-                  <li><strong>Spacebar:</strong> Shoot</li>
+                  <li><strong>Left/Right Arrows:</strong> Move piece</li>
+                  <li><strong>Up Arrow:</strong> Rotate piece</li>
+                  <li><strong>Down Arrow:</strong> Drop faster</li>
                 </ul>
               </div>
               <button className="start-game-btn" onClick={startGame}>
