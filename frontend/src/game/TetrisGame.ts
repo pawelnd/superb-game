@@ -1,4 +1,4 @@
-﻿import Phaser from "phaser";
+import Phaser from "phaser";
 
 const BOARD_WIDTH = 10;
 const BOARD_HEIGHT = 20;
