@@ -1,48 +1,50 @@
-import React, { useState, useRef, useEffect } from 'react';
-import './App.css';
-import { TetrisGame } from './game/TetrisGame';
+import React, { useEffect, useRef, useState } from "react";
+import "./App.css";
+import { TetrisGame } from "./game/TetrisGame";
 
 const App: React.FC = () => {
-  const [gameStarted, setGameStarted] = useState<boolean>(false);
+  const [gameStarted, setGameStarted] = useState(false);
   const gameRef = useRef<TetrisGame | null>(null);
-  const gameContainerRef = useRef<HTMLDivElement>(null);
-
-  const startGame = () => {
-    console.log('Start game clicked');
-    if (!gameStarted) {
-      setGameStarted(true);
-    }
-  };
+  const gameContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (gameStarted && gameContainerRef.current && !gameRef.current) {
       try {
-        console.log('Creating BattleCityGame...');
         gameRef.current = new TetrisGame(gameContainerRef.current);
-        console.log('Game created successfully');
       } catch (error) {
-        console.error('Error creating game:', error);
-        alert('Error starting game: ' + error);
+        console.error("Error creating Tetris game", error);
         setGameStarted(false);
+        alert("Error starting game. Check console for details.");
+      }
+    }
+
+    if (!gameStarted && gameRef.current) {
+      gameRef.current.destroy();
+      gameRef.current = null;
+      if (gameContainerRef.current) {
+        gameContainerRef.current.innerHTML = "";
       }
     }
   }, [gameStarted]);
-
-  const resetGame = () => {
-    if (gameRef.current) {
-      gameRef.current.destroy();
-      gameRef.current = null;
-    }
-    setGameStarted(false);
-  };
 
   useEffect(() => {
     return () => {
       if (gameRef.current) {
         gameRef.current.destroy();
+        gameRef.current = null;
       }
     };
   }, []);
+
+  const startGame = () => {
+    if (!gameStarted) {
+      setGameStarted(true);
+    }
+  };
+
+  const resetGame = () => {
+    setGameStarted(false);
+  };
 
   return (
     <div className="App">
@@ -55,14 +57,15 @@ const App: React.FC = () => {
         {!gameStarted ? (
           <div className="menu-screen">
             <div className="menu-container">
-              <h2>Tetris</h2>
-              <p>Arrange falling blocks to clear lines!</p>
+              <h2>Ready to Play?</h2>
+              <p>Stack the falling tetrominoes to clear lines and chase a new high score.</p>
               <div className="controls-info">
-                <h3>Controls:</h3>
+                <h3>Controls</h3>
                 <ul>
-                  <li><strong>Left/Right Arrows:</strong> Move piece</li>
-                  <li><strong>Up Arrow:</strong> Rotate piece</li>
-                  <li><strong>Down Arrow:</strong> Drop faster</li>
+                  <li><strong>Left / Right</strong> move piece</li>
+                  <li><strong>Up</strong> rotate piece</li>
+                  <li><strong>Down</strong> soft drop</li>
+                  <li><strong>Space</strong> hard drop</li>
                 </ul>
               </div>
               <button className="start-game-btn" onClick={startGame}>
@@ -74,10 +77,10 @@ const App: React.FC = () => {
           <div className="game-screen">
             <div className="game-ui">
               <button className="reset-game-btn" onClick={resetGame}>
-                Back to Menu
+                Reset
               </button>
             </div>
-            <div ref={gameContainerRef} id="game-container"></div>
+            <div id="game-container" ref={gameContainerRef} />
           </div>
         )}
       </main>
