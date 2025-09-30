@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from typing import Dict, List, Optional, Tuple
 
@@ -10,6 +11,7 @@ RECONNECT_GRACE_SECONDS = 10
 SESSION_CLEANUP_GRACE_SECONDS = 20
 MAX_NAME_LENGTH = 24
 
+logger = logging.getLogger("lobby")
 
 class LobbyPlayer:
     def __init__(self, player_id: str, name: str, websocket: Optional[WebSocket]) -> None:
@@ -17,7 +19,6 @@ class LobbyPlayer:
         self.name = name
         self.websocket: Optional[WebSocket] = websocket
         self.connected = websocket is not None
-
 
 async def safe_send(websocket: Optional[WebSocket], payload: Dict) -> None:
     if websocket is None:
@@ -28,7 +29,6 @@ async def safe_send(websocket: Optional[WebSocket], payload: Dict) -> None:
         pass
     except RuntimeError:
         pass
-
 
 class LobbyManager:
     def __init__(self) -> None:
@@ -47,20 +47,23 @@ class LobbyManager:
 
         sanitized_name = name.strip()[:MAX_NAME_LENGTH] if name else ""
         async with self.lock:
-            player: Optional[LobbyPlayer] = None
+            player: Optional[LobbyPlayer]
             if player_id and player_id in self.players:
                 player = self.players[player_id]
                 if sanitized_name:
                     player.name = sanitized_name
                 player.websocket = websocket
                 player.connected = True
+                logger.info("Player %s reconnected as %s", player.id, player.name)
             else:
                 generated_id = player_id or str(uuid4())
                 player = LobbyPlayer(generated_id, sanitized_name or generated_id[:6], websocket)
                 self.players[player.id] = player
+                logger.info("Player %s connected as %s", player.id, player.name)
                 player_id = player.id
             task = self.disconnect_tasks.pop(player.id, None)
         if task:
+            logger.info("Cancelled disconnect timer for %s", player.id)
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
@@ -71,20 +74,25 @@ class LobbyManager:
             player = self.players.pop(player_id, None)
             if player_id in self.queue:
                 self.queue.remove(player_id)
+                logger.info("Player %s removed from ready queue", player_id)
             task = self.disconnect_tasks.pop(player_id, None)
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        if player:
+            logger.info("Player %s removed from lobby (%s)", player_id, player.name)
 
     async def set_ready(self, player_id: str, ready: bool) -> None:
         async with self.lock:
             if ready:
                 if player_id not in self.queue:
                     self.queue.append(player_id)
+                    logger.info("Player %s marked ready", player_id)
             else:
                 if player_id in self.queue:
                     self.queue.remove(player_id)
+                    logger.info("Player %s unmarked as ready", player_id)
 
     async def snapshot(self) -> Tuple[List[Dict], List[Tuple[str, WebSocket]]]:
         async with self.lock:
@@ -114,6 +122,7 @@ class LobbyManager:
             except Exception:
                 stale.append(player_id)
         for player_id in stale:
+            logger.warning("Dropping stale socket for player %s", player_id)
             await self.remove_player(player_id)
 
     async def try_matchmake(self, game_manager: "GameManager") -> None:
@@ -125,14 +134,18 @@ class LobbyManager:
                     break
                 first_id = ready_ids.pop(0)
                 second_id = ready_ids.pop(0)
-                # remove matched ids from queue
                 self.queue = [pid for pid in self.queue if pid not in {first_id, second_id}]
                 first_player = self.players.get(first_id)
                 second_player = self.players.get(second_id)
             if not first_player or not second_player:
                 continue
+            logger.info("Matched players %s and %s", first_id, second_id)
             session = await game_manager.create_session(first_player, second_player)
             matches.append((first_player, second_player, session))
+        if matches:
+            await self.broadcast_state()
+            for player_one, player_two, session in matches:
+                await game_manager.notify_match_found(session, player_one, player_two)
         if matches:
             await self.broadcast_state()
             for player_one, player_two, session in matches:
@@ -147,8 +160,15 @@ class LobbyManager:
             player.websocket = None
             if player_id in self.queue:
                 self.queue.remove(player_id)
+                logger.info("Player %s removed from ready queue due to disconnect", player_id)
             if player_id in self.disconnect_tasks:
+                logger.debug("Disconnect timer for %s already scheduled", player_id)
                 return
+            logger.info(
+                "Player %s disconnected; waiting %s seconds for reconnect",
+                player_id,
+                RECONNECT_GRACE_SECONDS,
+            )
             task = asyncio.create_task(self._delayed_remove(player_id))
             self.disconnect_tasks[player_id] = task
 
@@ -158,13 +178,14 @@ class LobbyManager:
             async with self.lock:
                 player = self.players.get(player_id)
                 if player and not player.connected:
-                    self.players.pop(player_id, None)
+                    player = self.players.pop(player_id, None)
+            if player:
+                logger.info('Player %s removed after grace period', player_id)
             await self.broadcast_state()
         except asyncio.CancelledError:
-            pass
+            logger.debug('Reconnect timer for %s cancelled', player_id)
         finally:
             self.disconnect_tasks.pop(player_id, None)
-
 
 class GameSession:
     def __init__(self, session_id: str, players: Dict[str, str]) -> None:
@@ -185,10 +206,13 @@ class GameSession:
     async def add_connection(self, player_id: str, websocket: WebSocket) -> None:
         async with self.lock:
             self.connections[player_id] = websocket
+            logger.info('Player %s joined game %s', player_id, self.id)
 
     async def remove_connection(self, player_id: str) -> None:
         async with self.lock:
-            self.connections.pop(player_id, None)
+            removed = self.connections.pop(player_id, None)
+            if removed:
+                logger.info('Player %s left game %s', player_id, self.id)
 
     async def broadcast(self, payload: Dict, exclude: Optional[str] = None) -> None:
         async with self.lock:
@@ -217,7 +241,6 @@ class GameSession:
     async def get_state(self, player_id: str) -> Optional[Dict]:
         async with self.lock:
             return self.last_states.get(player_id)
-
 
 class GameManager:
     def __init__(self) -> None:
@@ -318,3 +341,7 @@ class GameManager:
             pass
         finally:
             self.cleanup_tasks.pop(session_id, None)
+
+
+
+
