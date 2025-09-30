@@ -1,6 +1,6 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+﻿from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..services.managers import GameManager, safe_send
+from ..services import GameManager, safe_send
 
 router = APIRouter()
 

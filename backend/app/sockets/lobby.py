@@ -1,8 +1,8 @@
-from typing import Optional
+﻿from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from ..services.managers import GameManager, LobbyManager, safe_send
+from ..services import GameManager, LobbyManager, safe_send
 
 router = APIRouter()
 

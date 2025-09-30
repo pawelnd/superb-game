@@ -1,8 +1,8 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes import register_routes
-from app.services.managers import GameManager, LobbyManager
+from app.services import GameManager, LobbyManager
 from app.sockets import register_sockets
 
 API_TITLE = "Superb Game API"
