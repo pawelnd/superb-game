@@ -21,6 +21,20 @@ interface ActivePiece {
   definition: PieceDefinition;
 }
 
+export interface TetrisStateSnapshot {
+  board: number[][];
+  score: number;
+  lines: number;
+  level: number;
+  isGameOver: boolean;
+}
+
+export interface TetrisGameOptions {
+  onStateUpdate?: (state: TetrisStateSnapshot) => void;
+  onGameOver?: (state: TetrisStateSnapshot) => void;
+  stateUpdateInterval?: number;
+}
+
 const rotateMatrix = (matrix: number[][]): number[][] => {
   const size = matrix.length;
   const result: number[][] = Array.from({ length: size }, () => Array(size).fill(0));
@@ -103,11 +117,11 @@ const basePieces: { name: string; color: number; matrix: number[][] }[] = [
 const buildPieces = (): PieceDefinition[] =>
   basePieces.map(({ name, color, matrix }) => {
     const normalized = matrix.map((row) => {
-      const paddedRow = [...row];
-      while (paddedRow.length < 4) {
-        paddedRow.push(0);
+      const padded = [...row];
+      while (padded.length < 4) {
+        padded.push(0);
       }
-      return paddedRow;
+      return padded;
     });
 
     while (normalized.length < 4) {
@@ -128,37 +142,31 @@ const TETROMINOES: PieceDefinition[] = buildPieces();
 
 class TetrisScene extends Phaser.Scene {
   private board: (number | null)[][] = [];
-
   private currentPiece: ActivePiece | null = null;
-
   private nextPiece: PieceDefinition | null = null;
-
   private dropTimer = 0;
-
   private dropInterval = 800;
-
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
-
   private hardDropKey!: Phaser.Input.Keyboard.Key;
-
   private boardGraphics!: Phaser.GameObjects.Graphics;
-
   private previewGraphics!: Phaser.GameObjects.Graphics;
-
   private scoreText!: Phaser.GameObjects.Text;
-
   private linesText!: Phaser.GameObjects.Text;
-
   private levelText!: Phaser.GameObjects.Text;
-
   private score = 0;
-
   private lines = 0;
-
+  private level = 1;
   private isGameOver = false;
+  private lastBroadcast = 0;
+  private readonly hooks: { onStateUpdate?: (state: TetrisStateSnapshot) => void; onGameOver?: (state: TetrisStateSnapshot) => void; interval: number };
 
-  constructor() {
+  constructor(options: TetrisGameOptions = {}) {
     super("TetrisScene");
+    this.hooks = {
+      onStateUpdate: options.onStateUpdate,
+      onGameOver: options.onGameOver,
+      interval: options.stateUpdateInterval ?? 150,
+    };
   }
 
   preload(): void {
@@ -420,15 +428,13 @@ class TetrisScene extends Phaser.Scene {
       const lineScores = [0, 100, 300, 500, 800];
       this.score += lineScores[linesCleared] ?? linesCleared * 200;
       this.lines += linesCleared;
-
-      const level = Math.floor(this.lines / 10) + 1;
-      this.dropInterval = Math.max(120, 800 - (level - 1) * 60);
+      this.level = Math.floor(this.lines / 10) + 1;
+      this.dropInterval = Math.max(120, 800 - (this.level - 1) * 60);
     }
 
     this.scoreText.setText(`Score: ${this.score}`);
     this.linesText.setText(`Lines: ${this.lines}`);
-    const level = Math.floor(this.lines / 10) + 1;
-    this.levelText.setText(`Level: ${level}`);
+    this.levelText.setText(`Level: ${this.level}`);
   }
 
   private triggerGameOver(): void {
@@ -443,11 +449,16 @@ class TetrisScene extends Phaser.Scene {
       fontSize: "18px",
       color: "#ffffff",
     });
+
+    const snapshot = this.buildSnapshot();
+    this.hooks.onGameOver?.(snapshot);
+    this.notifyStateUpdate(true);
   }
 
   private render(): void {
     this.renderBoard();
     this.renderPreview();
+    this.notifyStateUpdate();
   }
 
   private renderBoard(): void {
@@ -459,7 +470,7 @@ class TetrisScene extends Phaser.Scene {
       BOARD_OFFSET_Y - 6,
       BOARD_PIXEL_WIDTH + 12,
       BOARD_PIXEL_HEIGHT + 12,
-      8
+      8,
     );
 
     for (let y = 0; y < BOARD_HEIGHT; y += 1) {
@@ -532,19 +543,57 @@ class TetrisScene extends Phaser.Scene {
       }
     }
   }
+
+  private buildSnapshot(): TetrisStateSnapshot {
+    const boardCopy: number[][] = this.board.map((row) => row.map((value) => value ?? 0));
+
+    if (this.currentPiece && !this.isGameOver) {
+      const cells = this.getCells(this.currentPiece.definition, this.currentPiece.rotationIndex);
+      cells.forEach((cell) => {
+        const boardX = this.currentPiece!.x + cell.x;
+        const boardY = this.currentPiece!.y + cell.y;
+        if (boardY >= 0 && boardY < BOARD_HEIGHT && boardX >= 0 && boardX < BOARD_WIDTH) {
+          boardCopy[boardY][boardX] = this.currentPiece!.definition.color;
+        }
+      });
+    }
+
+    return {
+      board: boardCopy,
+      score: this.score,
+      lines: this.lines,
+      level: this.level,
+      isGameOver: this.isGameOver,
+    };
+  }
+
+  private notifyStateUpdate(force = false): void {
+    if (!this.hooks.onStateUpdate) {
+      return;
+    }
+
+    const now = Date.now();
+    if (!force && now - this.lastBroadcast < this.hooks.interval) {
+      return;
+    }
+
+    this.lastBroadcast = now;
+    this.hooks.onStateUpdate(this.buildSnapshot());
+  }
 }
 
 export class TetrisGame {
   private game: Phaser.Game;
 
-  constructor(parent: HTMLElement) {
+  constructor(parent: HTMLElement, options?: TetrisGameOptions) {
+    const scene = new TetrisScene(options);
     const config: Phaser.Types.Core.GameConfig = {
       type: Phaser.AUTO,
       width: BOARD_OFFSET_X + BOARD_PIXEL_WIDTH + 220,
       height: BOARD_OFFSET_Y + BOARD_PIXEL_HEIGHT + 40,
       backgroundColor: "#0d1117",
       parent,
-      scene: TetrisScene,
+      scene,
     };
 
     this.game = new Phaser.Game(config);
@@ -554,4 +603,3 @@ export class TetrisGame {
     this.game.destroy(true);
   }
 }
-
