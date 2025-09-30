@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..services.managers import GameManager, safe_send
 
@@ -21,6 +21,7 @@ async def game_endpoint(websocket: WebSocket, game_id: str) -> None:
 
     await websocket.accept()
     await session.add_connection(player_id, websocket)
+    await game_manager.cancel_cleanup(game_id)
 
     opponent = session.opponent_for(player_id)
     await safe_send(
@@ -32,8 +33,30 @@ async def game_endpoint(websocket: WebSocket, game_id: str) -> None:
         },
     )
 
-    if await session.connected_count() == len(session.players):
-        await session.broadcast({"type": "start"})
+    connected_count = await session.connected_count()
+    if connected_count == len(session.players):
+        if not session.started:
+            session.started = True
+            await session.broadcast({"type": "start"})
+        else:
+            await session.broadcast({"type": "opponent_returned", "playerId": player_id}, exclude=player_id)
+            await safe_send(websocket, {"type": "start"})
+
+    own_state = await session.get_state(player_id)
+    if own_state:
+        await safe_send(websocket, {"type": "resume_state", "state": own_state})
+
+    if opponent:
+        opponent_state = await session.get_state(opponent[0])
+        if opponent_state:
+            await safe_send(
+                websocket,
+                {
+                    "type": "opponent_state",
+                    "playerId": opponent[0],
+                    "state": opponent_state,
+                },
+            )
 
     try:
         while True:

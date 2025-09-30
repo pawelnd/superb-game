@@ -1,4 +1,4 @@
-from uuid import uuid4
+from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -10,7 +10,7 @@ router = APIRouter()
 @router.websocket("/ws/lobby")
 async def lobby_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
-    player_id = None
+    player_id: Optional[str] = None
 
     lobby_manager: LobbyManager = websocket.app.state.lobby_manager
     game_manager: GameManager = websocket.app.state.game_manager
@@ -21,22 +21,21 @@ async def lobby_endpoint(websocket: WebSocket) -> None:
             message_type = message.get("type")
 
             if message_type == "join":
-                if player_id is not None:
-                    continue
-                name = (message.get("name") or "").strip()
-                if not name:
+                requested_id = message.get("playerId")
+                incoming_name = (message.get("name") or "").strip()
+                if not incoming_name and not requested_id:
                     await safe_send(websocket, {"type": "error", "message": "Name is required"})
                     continue
 
-                player_id = str(uuid4())
-                player_name = name[:24]
-                await lobby_manager.add_player(player_id, player_name, websocket)
+                player = await lobby_manager.register_player(websocket, incoming_name, requested_id)
+                player_id = player.id
                 players_payload, _ = await lobby_manager.snapshot()
                 await safe_send(
                     websocket,
                     {
                         "type": "joined",
-                        "playerId": player_id,
+                        "playerId": player.id,
+                        "playerName": player.name,
                         "players": players_payload,
                     },
                 )
@@ -58,5 +57,4 @@ async def lobby_endpoint(websocket: WebSocket) -> None:
         pass
     finally:
         if player_id:
-            await lobby_manager.remove_player(player_id)
-            await lobby_manager.broadcast_state()
+            await lobby_manager.schedule_disconnect(player_id)

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import { OpponentBoard } from "./game/OpponentBoard";
 import { TetrisGame, TetrisStateSnapshot } from "./game/TetrisGame";
@@ -10,12 +10,26 @@ type LobbyPlayer = {
   id: string;
   name: string;
   isReady: boolean;
+  isConnected?: boolean;
 };
 
 type MatchInfo = {
   gameId: string;
   opponent: LobbyPlayer | null;
 };
+
+type PersistedState = {
+  playerId?: string;
+  playerName?: string;
+  phase?: Phase;
+  matchInfo?: MatchInfo | null;
+  gameStatus?: GameStatus;
+  isQueued?: boolean;
+  localState?: TetrisStateSnapshot | null;
+  opponentState?: TetrisStateSnapshot | null;
+};
+
+const STORAGE_KEY = "superb-game-state";
 
 const deriveWsBase = (): string => {
   const envBase = process.env.REACT_APP_WS_BASE;
@@ -34,23 +48,80 @@ const buildWsUrl = (base: string, path: string): string => `${base}${path}`;
 
 const isSocketOpen = (socket: WebSocket | null): boolean => socket?.readyState === WebSocket.OPEN;
 
+const loadPersistedState = (): PersistedState | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as PersistedState) : null;
+  } catch (error) {
+    console.warn("Failed to load persisted state", error);
+    return null;
+  }
+};
+
+const storePersistedState = (state: PersistedState): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (error) {
+    console.warn("Failed to persist state", error);
+  }
+};
+
+const clearPersistedState = (): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch (error) {
+    console.warn("Failed to clear persisted state", error);
+  }
+};
+
 const App: React.FC = () => {
-  const [phase, setPhase] = useState<Phase>("setup");
-  const [playerName, setPlayerName] = useState("");
-  const [nameInput, setNameInput] = useState("");
-  const [playerId, setPlayerId] = useState<string | null>(null);
+  const restoredRef = useRef<PersistedState | null>(loadPersistedState());
+  const restored = restoredRef.current;
+
+  const initialPhase: Phase = restored?.phase === "playing"
+    ? (restored.matchInfo ? "playing" : "lobby")
+    : restored?.phase === "lobby"
+    ? "lobby"
+    : "setup";
+
+  const [phase, setPhase] = useState<Phase>(initialPhase);
+  const [playerName, setPlayerName] = useState(restored?.playerName ?? "");
+  const [nameInput, setNameInput] = useState(restored?.playerName ?? "");
+  const [playerId, setPlayerId] = useState<string | null>(restored?.playerId ?? null);
   const [lobbyPlayers, setLobbyPlayers] = useState<LobbyPlayer[]>([]);
-  const [isQueued, setIsQueued] = useState(false);
-  const [matchInfo, setMatchInfo] = useState<MatchInfo | null>(null);
-  const [gameStatus, setGameStatus] = useState<GameStatus>("idle");
-  const [localState, setLocalState] = useState<TetrisStateSnapshot | null>(null);
-  const [opponentState, setOpponentState] = useState<TetrisStateSnapshot | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string>("");
+  const [isQueued, setIsQueued] = useState(restored?.isQueued ?? false);
+  const [matchInfo, setMatchInfo] = useState<MatchInfo | null>(restored?.matchInfo ?? null);
+  const [gameStatus, setGameStatus] = useState<GameStatus>(
+    initialPhase === "playing" ? "waiting" : restored?.gameStatus ?? "idle",
+  );
+  const [localState, setLocalState] = useState<TetrisStateSnapshot | null>(restored?.localState ?? null);
+  const [opponentState, setOpponentState] = useState<TetrisStateSnapshot | null>(restored?.opponentState ?? null);
+  const [statusMessage, setStatusMessage] = useState(
+    restored ? "Restoring previous session..." : "",
+  );
+  const phaseRef = useRef(phase);
 
   const lobbySocketRef = useRef<WebSocket | null>(null);
   const gameSocketRef = useRef<WebSocket | null>(null);
   const gameContainerRef = useRef<HTMLDivElement | null>(null);
   const tetrisRef = useRef<TetrisGame | null>(null);
+  const pendingLobbyJoin = useRef<{ name: string; playerId?: string } | null>(
+    restored?.playerName
+      ? { name: restored.playerName, playerId: restored.playerId ?? undefined }
+      : null,
+  );
 
   const wsBase = useMemo(() => deriveWsBase(), []);
 
@@ -62,92 +133,6 @@ const App: React.FC = () => {
     },
     [],
   );
-
-  const handleLobbyMessage = (message: any) => {
-    switch (message.type) {
-      case "joined": {
-        setPlayerId(message.playerId);
-        setPlayerName(nameInput.trim());
-        setLobbyPlayers(message.players ?? []);
-        setPhase("lobby");
-        setStatusMessage("Connected to lobby. Queue up when you are ready.");
-        break;
-      }
-      case "lobby_state": {
-        const players: LobbyPlayer[] = message.players ?? [];
-        setLobbyPlayers(players);
-        if (playerId) {
-          const me = players.find((player) => player.id === playerId);
-          setIsQueued(Boolean(me?.isReady));
-        }
-        break;
-      }
-      case "match_found": {
-        const opponent: LobbyPlayer = message.opponent ?? null;
-        const info: MatchInfo = { gameId: message.gameId, opponent };
-        setMatchInfo(info);
-        setPhase("playing");
-        setGameStatus("waiting");
-        setIsQueued(false);
-        setStatusMessage("Match found! Connecting to game server...");
-        connectToGame(info.gameId);
-        break;
-      }
-      case "error": {
-        setStatusMessage(message.message ?? "Lobby error");
-        break;
-      }
-      default:
-        break;
-    }
-  };
-
-  const joinLobby = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!nameInput.trim()) {
-      setStatusMessage("Enter a display name to join the lobby.");
-      return;
-    }
-    if (lobbySocketRef.current) {
-      return;
-    }
-
-    const socket = new WebSocket(buildWsUrl(wsBase, "/ws/lobby"));
-    lobbySocketRef.current = socket;
-
-    socket.onopen = () => {
-      socket.send(
-        JSON.stringify({
-          type: "join",
-          name: nameInput.trim(),
-        }),
-      );
-    };
-
-    socket.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        handleLobbyMessage(data);
-      } catch (error) {
-        console.error("Failed to parse lobby message", error);
-      }
-    };
-
-    socket.onclose = () => {
-      lobbySocketRef.current = null;
-      setIsQueued(false);
-      if (phase !== "playing") {
-        setPhase("setup");
-        setPlayerId(null);
-        setLobbyPlayers([]);
-        setStatusMessage("Disconnected from lobby.");
-      }
-    };
-
-    socket.onerror = () => {
-      setStatusMessage("Unable to reach lobby server.");
-    };
-  };
 
   const toggleQueue = () => {
     if (!playerId || !lobbySocketRef.current) {
@@ -165,49 +150,169 @@ const App: React.FC = () => {
     setStatusMessage(nextReady ? "Searching for an opponent..." : "Matchmaking paused.");
   };
 
-  const connectToGame = (gameId: string) => {
-    if (!playerId) {
+  const connectToGame = useCallback(
+    (gameId: string) => {
+      if (!playerId) {
+        return;
+      }
+
+      if (gameSocketRef.current) {
+        try {
+          gameSocketRef.current.close();
+        } catch (error) {
+          console.warn("Error closing previous game socket", error);
+        }
+      }
+
+      const socket = new WebSocket(buildWsUrl(wsBase, `/ws/game/${gameId}?playerId=${playerId}`));
+      gameSocketRef.current = socket;
+
+      setStatusMessage((current) => current || "Connecting to game room...");
+
+      socket.onopen = () => {
+        setStatusMessage("Connected to game room. Waiting for opponent...");
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          handleGameMessage(data);
+        } catch (error) {
+          console.error("Failed to parse game message", error);
+        }
+      };
+
+      socket.onclose = () => {
+        gameSocketRef.current = null;
+        if (phaseRef.current === "playing") {
+          setStatusMessage((message) => message || "Game connection closed. Attempting to reconnect...");
+        }
+      };
+
+      socket.onerror = () => {
+        setStatusMessage("Lost connection to game server.");
+      };
+    },
+    [playerId, wsBase],
+  );
+
+  const handleLobbyMessage = useCallback(
+    (message: any) => {
+      switch (message.type) {
+        case "joined": {
+          const joinedId = message.playerId as string;
+          const joinedName = (message.playerName as string) ?? playerName;
+          setPlayerId(joinedId);
+          setPlayerName(joinedName);
+          setNameInput(joinedName);
+          setLobbyPlayers(message.players ?? []);
+          setPhase((current) => (current === "setup" ? "lobby" : current));
+          setStatusMessage((current) => current || "Connected to lobby. Queue up when you are ready.");
+          break;
+        }
+        case "lobby_state": {
+          const players: LobbyPlayer[] = message.players ?? [];
+          setLobbyPlayers(players);
+          if (playerId) {
+            const me = players.find((player) => player.id === playerId);
+            setIsQueued(Boolean(me?.isReady));
+          }
+          break;
+        }
+        case "match_found": {
+          const opponent: LobbyPlayer = message.opponent ?? null;
+          const info: MatchInfo = { gameId: message.gameId, opponent };
+          setMatchInfo(info);
+          setPhase("playing");
+          setGameStatus("waiting");
+          setIsQueued(false);
+          setStatusMessage("Match found! Connecting to game server...");
+          connectToGame(info.gameId);
+          break;
+        }
+        case "error": {
+          setStatusMessage(message.message ?? "Lobby error");
+          break;
+        }
+        default:
+          break;
+      }
+    },
+    [playerId, playerName, connectToGame],
+  );
+
+  const connectToLobby = useCallback((options: { name: string; playerId?: string }) => {
+    const displayName = options.name.trim();
+    if (!displayName && !options.playerId) {
+      setStatusMessage("Enter a display name to join the lobby.");
       return;
     }
 
-    if (gameSocketRef.current) {
-      try {
-        gameSocketRef.current.close();
-      } catch (error) {
-        console.warn("Error closing previous game socket", error);
-      }
+    if (lobbySocketRef.current) {
+      return;
     }
 
-    setLocalState(null);
-    setOpponentState(null);
-
-    const socket = new WebSocket(buildWsUrl(wsBase, `/ws/game/${gameId}?playerId=${playerId}`));
-    gameSocketRef.current = socket;
+    const socket = new WebSocket(buildWsUrl(wsBase, "/ws/lobby"));
+    lobbySocketRef.current = socket;
 
     socket.onopen = () => {
-      setStatusMessage("Connected to game room. Waiting for opponent...");
+      socket.send(
+        JSON.stringify({
+          type: "join",
+          name: displayName,
+          playerId: options.playerId,
+        }),
+      );
     };
 
     socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        handleGameMessage(data);
+        handleLobbyMessage(data);
       } catch (error) {
-        console.error("Failed to parse game message", error);
+        console.error("Failed to parse lobby message", error);
       }
     };
 
     socket.onclose = () => {
-      gameSocketRef.current = null;
-      if (gameStatus !== "idle") {
-        setStatusMessage((message) => message || "Game connection closed.");
+      lobbySocketRef.current = null;
+      setIsQueued(false);
+      if (phaseRef.current !== "playing") {
+        setPlayerId(null);
+        setLobbyPlayers([]);
+        setStatusMessage((message) => message || "Disconnected from lobby.");
+        setPhase("setup");
       }
     };
 
     socket.onerror = () => {
-      setStatusMessage("Lost connection to game server.");
+      setStatusMessage("Unable to reach lobby server.");
     };
+  }, [wsBase, handleLobbyMessage]);
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+
+  const joinLobby = (event: React.FormEvent) => {
+    event.preventDefault();
+    connectToLobby({ name: nameInput });
   };
+
+  useEffect(() => {
+    if (!lobbySocketRef.current && pendingLobbyJoin.current) {
+      connectToLobby(pendingLobbyJoin.current);
+      pendingLobbyJoin.current = null;
+    }
+  }, [connectToLobby]);
+
+
+  useEffect(() => {
+    if (phase === "playing" && matchInfo && playerId && !gameSocketRef.current) {
+      setStatusMessage("Reconnecting to game room...");
+      connectToGame(matchInfo.gameId);
+    }
+  }, [phase, matchInfo, playerId, connectToGame]);
 
   const handleGameMessage = (message: any) => {
     switch (message.type) {
@@ -215,12 +320,23 @@ const App: React.FC = () => {
         if (message.opponent) {
           setMatchInfo((current) => (current ? { ...current, opponent: message.opponent } : current));
         }
-        setStatusMessage("Opponent connected. Get ready!");
         break;
       }
       case "start": {
         setGameStatus("active");
         setStatusMessage("");
+        break;
+      }
+      case "resume_state": {
+        const snapshot: TetrisStateSnapshot | null = message.state ?? null;
+        if (snapshot) {
+          setLocalState(snapshot);
+          if (tetrisRef.current) {
+            tetrisRef.current.syncWithSnapshot(snapshot);
+          }
+        }
+        setGameStatus("active");
+        setStatusMessage("Game resumed.");
         break;
       }
       case "opponent_state": {
@@ -234,8 +350,11 @@ const App: React.FC = () => {
         break;
       }
       case "opponent_left": {
-        setStatusMessage("Opponent disconnected. Returning to lobby once you leave the game.");
-        setGameStatus("finished");
+        setStatusMessage("Opponent disconnected. Waiting for them to return...");
+        break;
+      }
+      case "opponent_returned": {
+        setStatusMessage("Opponent reconnected. Keep playing!");
         break;
       }
       default:
@@ -244,7 +363,15 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    if (gameStatus !== "active" || !gameContainerRef.current) {
+    if (phase !== "playing") {
+      return;
+    }
+
+    if (gameStatus === "idle") {
+      return;
+    }
+
+    if (!gameContainerRef.current) {
       return;
     }
 
@@ -252,36 +379,33 @@ const App: React.FC = () => {
       return;
     }
 
-    const onStateUpdate = (snapshot: TetrisStateSnapshot) => {
-      setLocalState(snapshot);
-      if (isSocketOpen(gameSocketRef.current)) {
-        gameSocketRef.current!.send(
-          JSON.stringify({
-            type: "state_update",
-            state: snapshot,
-          }),
-        );
-      }
-    };
-
-    const onGameOver = (snapshot: TetrisStateSnapshot) => {
-      setLocalState(snapshot);
-      if (isSocketOpen(gameSocketRef.current)) {
-        gameSocketRef.current!.send(
-          JSON.stringify({
-            type: "game_over",
-            state: snapshot,
-          }),
-        );
-      }
-      setStatusMessage("You topped out. Head back to the lobby when ready.");
-      setGameStatus("finished");
-    };
-
     const game = new TetrisGame(gameContainerRef.current, {
-      onStateUpdate,
-      onGameOver,
+      onStateUpdate: (snapshot) => {
+        setLocalState(snapshot);
+        if (isSocketOpen(gameSocketRef.current)) {
+          gameSocketRef.current!.send(
+            JSON.stringify({
+              type: "state_update",
+              state: snapshot,
+            }),
+          );
+        }
+      },
+      onGameOver: (snapshot) => {
+        setLocalState(snapshot);
+        if (isSocketOpen(gameSocketRef.current)) {
+          gameSocketRef.current!.send(
+            JSON.stringify({
+              type: "game_over",
+              state: snapshot,
+            }),
+          );
+        }
+        setStatusMessage("You topped out. Head back to the lobby when ready.");
+        setGameStatus("finished");
+      },
       stateUpdateInterval: 150,
+      initialState: localState ?? undefined,
     });
 
     tetrisRef.current = game;
@@ -290,7 +414,13 @@ const App: React.FC = () => {
       game.destroy();
       tetrisRef.current = null;
     };
-  }, [gameStatus]);
+  }, [phase, gameStatus, localState]);
+
+  useEffect(() => {
+    if (phase === "playing" && gameStatus === "waiting" && localState && tetrisRef.current) {
+      tetrisRef.current.syncWithSnapshot(localState);
+    }
+  }, [phase, gameStatus, localState]);
 
   const leaveGame = () => {
     if (isSocketOpen(gameSocketRef.current)) {
@@ -312,12 +442,65 @@ const App: React.FC = () => {
     setPhase("lobby");
   };
 
+  const resetSession = () => {
+    if (isSocketOpen(gameSocketRef.current)) {
+      gameSocketRef.current!.send(JSON.stringify({ type: "leave" }));
+    }
+    if (isSocketOpen(lobbySocketRef.current)) {
+      lobbySocketRef.current!.send(JSON.stringify({ type: "leave" }));
+    }
+
+    gameSocketRef.current?.close();
+    lobbySocketRef.current?.close();
+    gameSocketRef.current = null;
+    lobbySocketRef.current = null;
+
+    if (tetrisRef.current) {
+      tetrisRef.current.destroy();
+      tetrisRef.current = null;
+    }
+
+    clearPersistedState();
+    restoredRef.current = null;
+    pendingLobbyJoin.current = null;
+
+    setPhase("setup");
+    setPlayerName("");
+    setNameInput("");
+    setPlayerId(null);
+    setLobbyPlayers([]);
+    setIsQueued(false);
+    setMatchInfo(null);
+    setGameStatus("idle");
+    setLocalState(null);
+    setOpponentState(null);
+    setStatusMessage("Session reset. Enter the lobby to start again.");
+  };
+
+  useEffect(() => {
+    if (!playerId && phase === "setup" && !playerName) {
+      clearPersistedState();
+      return;
+    }
+
+    storePersistedState({
+      playerId: playerId ?? undefined,
+      playerName: playerName || undefined,
+      phase,
+      matchInfo,
+      gameStatus,
+      isQueued,
+      localState,
+      opponentState,
+    });
+  }, [playerId, playerName, phase, matchInfo, gameStatus, isQueued, localState, opponentState]);
+
   const renderLobby = () => (
     <div className="lobby-screen">
       <div className="lobby-card">
         <div className="lobby-header">
           <h2>Lobby</h2>
-          <p>Signed in as <strong>{playerName}</strong></p>
+          <p>Signed in as <strong>{playerName || "Guest"}</strong></p>
         </div>
         <button className="matchmaking-btn" onClick={toggleQueue}>
           {isQueued ? "Cancel Matchmaking" : "Find Match"}
@@ -326,15 +509,23 @@ const App: React.FC = () => {
           {lobbyPlayers.length === 0 ? (
             <p className="lobby-empty">No other players yet. Invite a friend!</p>
           ) : (
-            lobbyPlayers.map((player) => (
-              <div
-                key={player.id}
-                className={`lobby-player${player.id === playerId ? " me" : ""}${player.isReady ? " ready" : ""}`}
-              >
-                <span className="lobby-player__name">{player.name}</span>
-                <span className="lobby-player__status">{player.isReady ? "Ready" : "Idle"}</span>
-              </div>
-            ))
+            lobbyPlayers.map((player) => {
+              const statusLabel = player.isConnected === false ? "Reconnecting..." : player.isReady ? "Ready" : "Idle";
+              const cardClasses = [
+                "lobby-player",
+                player.id === playerId ? "me" : "",
+                player.isReady ? "ready" : "",
+                player.isConnected === false ? "offline" : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return (
+                <div key={player.id} className={cardClasses}>
+                  <span className="lobby-player__name">{player.name}</span>
+                  <span className="lobby-player__status">{statusLabel}</span>
+                </div>
+              );
+            })
           )}
         </div>
       </div>
@@ -381,11 +572,22 @@ const App: React.FC = () => {
     );
   };
 
+  const shouldShowReset = Boolean(playerId || playerName || phase !== "setup");
+
   return (
     <div className="App">
       <header className="App-header">
-        <h1>Superb Game</h1>
-        <p>Multiplayer Tetris Arena</p>
+        <div className="header-info">
+          <h1>Superb Game</h1>
+          <p>Multiplayer Tetris Arena</p>
+        </div>
+        {shouldShowReset && (
+          <div className="header-actions">
+            <button className="ghost-btn" onClick={resetSession}>
+              Reset Session
+            </button>
+          </div>
+        )}
       </header>
 
       <main className="main-content">
@@ -421,3 +623,10 @@ const App: React.FC = () => {
 };
 
 export default App;
+
+
+
+
+
+
+

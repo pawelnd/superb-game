@@ -33,6 +33,7 @@ export interface TetrisGameOptions {
   onStateUpdate?: (state: TetrisStateSnapshot) => void;
   onGameOver?: (state: TetrisStateSnapshot) => void;
   stateUpdateInterval?: number;
+  initialState?: TetrisStateSnapshot;
 }
 
 const rotateMatrix = (matrix: number[][]): number[][] => {
@@ -158,7 +159,13 @@ class TetrisScene extends Phaser.Scene {
   private level = 1;
   private isGameOver = false;
   private lastBroadcast = 0;
-  private readonly hooks: { onStateUpdate?: (state: TetrisStateSnapshot) => void; onGameOver?: (state: TetrisStateSnapshot) => void; interval: number };
+  private gameOverLabelAdded = false;
+  private readonly hooks: {
+    onStateUpdate?: (state: TetrisStateSnapshot) => void;
+    onGameOver?: (state: TetrisStateSnapshot) => void;
+    interval: number;
+    initialState?: TetrisStateSnapshot;
+  };
 
   constructor(options: TetrisGameOptions = {}) {
     super("TetrisScene");
@@ -166,6 +173,7 @@ class TetrisScene extends Phaser.Scene {
       onStateUpdate: options.onStateUpdate,
       onGameOver: options.onGameOver,
       interval: options.stateUpdateInterval ?? 150,
+      initialState: options.initialState,
     };
   }
 
@@ -177,6 +185,7 @@ class TetrisScene extends Phaser.Scene {
     this.board = Array.from({ length: BOARD_HEIGHT }, () => Array(BOARD_WIDTH).fill(null));
     this.boardGraphics = this.add.graphics();
     this.previewGraphics = this.add.graphics();
+    this.gameOverLabelAdded = false;
 
     this.add.text(BOARD_OFFSET_X, 12, "Tetris", {
       fontFamily: "Arial",
@@ -221,6 +230,11 @@ class TetrisScene extends Phaser.Scene {
     this.nextPiece = this.pickRandomPiece();
     this.spawnPiece();
     this.render();
+
+    if (this.hooks.initialState) {
+      this.syncFromSnapshot(this.hooks.initialState);
+      this.hooks.initialState = undefined;
+    }
   }
 
   update(_time: number, delta: number): void {
@@ -423,6 +437,12 @@ class TetrisScene extends Phaser.Scene {
     return cleared;
   }
 
+  private refreshHud(): void {
+    this.scoreText.setText(`Score: ${this.score}`);
+    this.linesText.setText(`Lines: ${this.lines}`);
+    this.levelText.setText(`Level: ${this.level}`);
+  }
+
   private updateScore(linesCleared: number): void {
     if (linesCleared > 0) {
       const lineScores = [0, 100, 300, 500, 800];
@@ -432,13 +452,14 @@ class TetrisScene extends Phaser.Scene {
       this.dropInterval = Math.max(120, 800 - (this.level - 1) * 60);
     }
 
-    this.scoreText.setText(`Score: ${this.score}`);
-    this.linesText.setText(`Lines: ${this.lines}`);
-    this.levelText.setText(`Level: ${this.level}`);
+    this.refreshHud();
   }
 
-  private triggerGameOver(): void {
-    this.isGameOver = true;
+  private showGameOverBanner(): void {
+    if (this.gameOverLabelAdded) {
+      return;
+    }
+
     this.add.text(BOARD_OFFSET_X + 10, BOARD_OFFSET_Y + 200, "Game Over", {
       fontFamily: "Arial",
       fontSize: "32px",
@@ -449,6 +470,16 @@ class TetrisScene extends Phaser.Scene {
       fontSize: "18px",
       color: "#ffffff",
     });
+    this.gameOverLabelAdded = true;
+  }
+
+  private triggerGameOver(): void {
+    if (this.isGameOver) {
+      return;
+    }
+
+    this.isGameOver = true;
+    this.showGameOverBanner();
 
     const snapshot = this.buildSnapshot();
     this.hooks.onGameOver?.(snapshot);
@@ -567,6 +598,29 @@ class TetrisScene extends Phaser.Scene {
     };
   }
 
+  private applySnapshot(snapshot: TetrisStateSnapshot): void {
+    this.board = snapshot.board.map((row) => row.map((value) => (value === 0 ? null : value)));
+    this.score = snapshot.score;
+    this.lines = snapshot.lines;
+    this.level = snapshot.level;
+    this.isGameOver = snapshot.isGameOver;
+    this.dropInterval = Math.max(120, 800 - (this.level - 1) * 60);
+    this.currentPiece = null;
+    this.gameOverLabelAdded = false;
+
+    this.refreshHud();
+    this.renderBoard();
+    this.renderPreview();
+
+    if (this.isGameOver) {
+      this.showGameOverBanner();
+    }
+  }
+
+  public syncFromSnapshot(snapshot: TetrisStateSnapshot): void {
+    this.applySnapshot(snapshot);
+  }
+
   private notifyStateUpdate(force = false): void {
     if (!this.hooks.onStateUpdate) {
       return;
@@ -597,6 +651,22 @@ export class TetrisGame {
     };
 
     this.game = new Phaser.Game(config);
+  }
+
+  private getScene(): TetrisScene | null {
+    try {
+      const scene = this.game.scene.getScene("TetrisScene") as TetrisScene;
+      return scene.scene.isActive() ? scene : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  syncWithSnapshot(snapshot: TetrisStateSnapshot): void {
+    const scene = this.getScene();
+    if (scene) {
+      scene.syncFromSnapshot(snapshot);
+    }
   }
 
   destroy(): void {
